@@ -1,4 +1,4 @@
-# AI Research Paper Digest
+# ArxivLens
 
 An AI-powered research assistant that automatically tracks arXiv papers, analyzes them with GPT-4o, and lets you explore your paper library through a conversational chat interface.
 
@@ -100,13 +100,13 @@ app/
 │   ├── database.py      # Async engine + session factory
 │   └── crud.py          # All database operations
 ├── services/
-│   ├── arxiv_feed.py    # RSS polling + arXiv API metadata enrichment
-│   ├── pipeline.py      # Download → extract → analyze → save
-│   ├── analyzer.py      # GPT-4o structured analysis (JSON mode)
-│   ├── pdf.py           # PDF download, text extraction, blob storage
-│   └── chat.py          # Chat engine with tool-calling loop + SSE streaming
+│   ├── feed_poller.py    # RSS polling + arXiv API metadata enrichment
+│   ├── processor.py      # Download → extract → analyze → save
+│   ├── paper_analyzer.py # GPT-4o structured analysis (JSON mode)
+│   ├── pdf_extractor.py  # PDF download, text extraction, blob storage
+│   └── chat_agent.py     # Chat engine with tool-calling loop + SSE streaming
 ├── scheduler/
-│   └── jobs.py          # APScheduler: poll every 6h + startup catch-up
+│   └── tasks.py          # APScheduler: poll every 6h + startup catch-up
 ├── mcp/
 │   └── server.py        # MCP tools for external AI agents
 └── ui/

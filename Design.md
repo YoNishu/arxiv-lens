@@ -1,4 +1,4 @@
-# AI Research Paper Digest — Design Document
+# ArxivLens — Design Document
 
 > **Author**: Pathik Patel
 > **Date**: 29 March 2026
@@ -381,7 +381,7 @@ arXiv RSS (cs.AI, cs.LG, stat.ML, ...)
 ## Project Structure
 
 ```
-ai-research-paper-digest/
+arxiv-lens/
 ├── app/
 │   ├── __init__.py
 │   ├── main.py                 # FastAPI app + lifespan (DB, scheduler, MCP)
@@ -393,11 +393,11 @@ ai-research-paper-digest/
 │   │   └── crud.py             # All database operations
 │   ├── services/
 │   │   ├── __init__.py
-│   │   ├── arxiv_feed.py       # arXiv RSS polling + arxiv lib metadata fetch
-│   │   ├── pdf.py              # PDF download → blob upload → text extraction → cleanup
-│   │   ├── analyzer.py         # Azure OpenAI GPT-4o structured analysis (JSON mode)
-│   │   ├── pipeline.py         # Orchestrator: download → extract → analyze → store
-│   │   └── chat.py             # Chat agent: Azure OpenAI tool-calling + SSE streaming
+│   │   ├── feed_poller.py       # arXiv RSS polling + arxiv lib metadata fetch
+│   │   ├── pdf_extractor.py     # PDF download → blob upload → text extraction → cleanup
+│   │   ├── paper_analyzer.py    # Azure OpenAI GPT-4o structured analysis (JSON mode)
+│   │   ├── processor.py         # Orchestrator: download → extract → analyze → store
+│   │   └── chat_agent.py        # Chat agent: Azure OpenAI tool-calling + SSE streaming
 │   ├── api/
 │   │   ├── __init__.py
 │   │   ├── routes.py           # REST + Chat SSE endpoints
@@ -407,7 +407,7 @@ ai-research-paper-digest/
 │   │   └── server.py           # FastMCP tools for AI assistant integration
 │   ├── scheduler/
 │   │   ├── __init__.py
-│   │   └── jobs.py             # APScheduler job: poll + process every 6h
+│   │   └── tasks.py             # APScheduler job: poll + process every 6h
 │   └── ui/
 │       ├── views.py            # Server-rendered routes (Jinja2)
 │       ├── static/
@@ -430,12 +430,12 @@ ai-research-paper-digest/
 
 | Module | Responsibility | Dependencies | Parallel to Podcast Project |
 |--------|---------------|-------------|----------------------------|
-| `arxiv_feed.py` | Poll arXiv RSS, fetch metadata via `arxiv` lib, detect new papers by arXiv ID | `feedparser`, `arxiv`, `crud` | `rss.py` |
-| `pdf.py` | Download PDF, upload to blob, extract text with PyMuPDF, cleanup | `arxiv`, `pymupdf`, `azure-storage-blob` | `audio.py` + `transcription.py` |
-| `analyzer.py` | Send extracted text to Azure OpenAI GPT-4o for structured JSON analysis | `openai` (Azure) | `summarizer.py` |
-| `pipeline.py` | Chain download → extract → analyze per paper, manage state transitions | All services, `crud` | `pipeline.py` |
-| `chat.py` | Multi-round tool-calling chat agent, SSE streaming | `openai` (Azure), `crud` | `chat.py` |
-| `jobs.py` | APScheduler: poll + process every 6h | `arxiv_feed`, `pipeline` | `jobs.py` |
+| `feed_poller.py` | Poll arXiv RSS, fetch metadata via `arxiv` lib, detect new papers by arXiv ID | `feedparser`, `arxiv`, `crud` | `rss.py` |
+| `pdf_extractor.py` | Download PDF, upload to blob, extract text with PyMuPDF, cleanup | `arxiv`, `pymupdf`, `azure-storage-blob` | `audio.py` + `transcription.py` |
+| `paper_analyzer.py` | Send extracted text to Azure OpenAI GPT-4o for structured JSON analysis | `openai` (Azure) | `summarizer.py` |
+| `processor.py` | Chain download → extract → analyze per paper, manage state transitions | All services, `crud` | `pipeline.py` |
+| `chat_agent.py` | Multi-round tool-calling chat agent, SSE streaming | `openai` (Azure), `crud` | `chat.py` |
+| `tasks.py` | APScheduler: poll + process every 6h | `feed_poller`, `processor` | `jobs.py` |
 | `server.py` (MCP) | FastMCP tools for external AI assistants | `crud` | `server.py` |
 | `crud.py` | All async database operations | SQLAlchemy | `crud.py` |
 | `models.py` | 5 SQLAlchemy ORM models | SQLAlchemy | `models.py` |
@@ -644,9 +644,9 @@ fastmcp>=2.0.0
 
 ---
 
-## Comparison: Podcast Assistant → Paper Digest
+## Comparison: Podcast Assistant → ArxivLens
 
-| Aspect | Podcast Assistant | Paper Digest |
+| Aspect | Podcast Assistant | ArxivLens |
 |--------|------------------|-------------|
 | **Source** | Podcast RSS feeds | arXiv RSS feeds + `arxiv` library |
 | **Content** | Audio files (50–100 MB) | PDF files (1–5 MB) |

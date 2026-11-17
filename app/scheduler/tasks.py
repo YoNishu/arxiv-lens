@@ -4,8 +4,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
-from app.services.arxiv_feed import poll_all_categories, sync_categories_from_yaml
-from app.services.pipeline import process_pending_papers
+from app.services.feed_poller import poll_all_categories, sync_categories_from_yaml
+from app.services.processor import process_pending_papers
 
 logger = logging.getLogger(__name__)
 

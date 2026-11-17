@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Single-click deployment of AI Research Paper Digest to Azure.
+    Single-click deployment of ArxivLens to Azure.
 
 .DESCRIPTION
     Creates all Azure resources (Resource Group, PostgreSQL, Storage, Azure OpenAI,
@@ -56,7 +56,7 @@ $PostgresPassword = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 2
 $PostgresPassword += "Aa1!"  # Ensure complexity requirements
 
 Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host " AI Research Paper Digest — Azure Deploy" -ForegroundColor Cyan
+Write-Host " ArxivLens — Azure Deploy" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
 Write-Host "  Compute region:  $Location" -ForegroundColor DarkGray
 Write-Host "  Database region: $DbLocation" -ForegroundColor DarkGray

@@ -5,8 +5,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.db import crud
-from app.services.arxiv_feed import poll_all_categories, poll_category, sync_categories_from_yaml
-from app.services.pipeline import process_pending_papers
+from app.services.feed_poller import poll_all_categories, poll_category, sync_categories_from_yaml
+from app.services.processor import process_pending_papers
 
 logger = logging.getLogger(__name__)
 

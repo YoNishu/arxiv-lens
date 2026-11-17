@@ -6,7 +6,7 @@ from app.db import crud
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("Paper Digest Assistant")
+mcp = FastMCP("ArxivLens Assistant")
 
 
 @mcp.tool()

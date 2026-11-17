@@ -14,8 +14,8 @@ from app.api.schemas import (
     PaperResponse,
 )
 from app.db import crud
-from app.services import chat, pipeline
-from app.services.arxiv_feed import poll_all_categories, poll_category, sync_categories_from_yaml
+from app.services import chat_agent, processor
+from app.services.feed_poller import poll_all_categories, poll_category, sync_categories_from_yaml
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -55,7 +55,7 @@ async def remove_category(category_id: int):
 async def _poll_and_process_category(arxiv_code: str, category_id: int):
     try:
         await poll_category(arxiv_code, category_id)
-        await pipeline.process_pending_papers()
+        await processor.process_pending_papers()
     except Exception:
         logger.exception("Background poll+process failed for %s", arxiv_code)
 
@@ -107,7 +107,7 @@ async def trigger_process():
     logger.info("POST /process — manual poll+process triggered")
     await sync_categories_from_yaml()
     results = await poll_all_categories()
-    processed = await pipeline.process_pending_papers()
+    processed = await processor.process_pending_papers()
     total_new = sum(results.values())
     logger.info("Manual process complete: %d new papers found, %d processed", total_new, processed)
     return {"message": "Done", "new_papers_found": total_new, "papers_processed": processed}
@@ -199,7 +199,7 @@ async def chat_endpoint(body: ChatRequest):
 
     async def event_stream():
         yield f"data: {json.dumps({'type': 'meta', 'conversation_id': conv_id})}\n\n"
-        async for chunk in chat.chat_stream(conv_id, body.message):
+        async for chunk in chat_agent.chat_stream(conv_id, body.message):
             yield f"data: {chunk}\n\n"
         yield "data: [DONE]\n\n"
 
