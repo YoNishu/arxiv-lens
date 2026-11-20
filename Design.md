@@ -1,6 +1,5 @@
 # ArxivLens — Design Document
 
-> **Author**: Pathik Patel
 > **Date**: 29 March 2026
 > **Status**: Draft
 

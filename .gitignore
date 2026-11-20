@@ -9,4 +9,3 @@ dist/
 build/
 .mypy_cache/
 .pytest_cache/
-INTERVIEW_QA.md
