@@ -1,128 +1,161 @@
 """Cycles: started in the background, one at a time per process, recorded in the database."""
-import time
+import json
 
-from conftest import feed, wait_until
+import pytest
 
-A, B, C = "2401.00001", "2401.00002", "2401.00003"
+from conftest import feed, new_home, new_server, new_standin, use_test_database, wait_until
+
+A, B, C, D, E = "2401.90001", "2401.90002", "2401.90003", "2401.90004", "2401.90005"
 
 
-def test_triggers_answer_at_once_and_overlapping_triggers_share_one_cycle(env):
-    env.set_scenario(feeds={"cs.AI": feed((A, 1, "new"))}, slow=3)
-    env.set_yaml_categories(["cs.AI"])
-    app = env.start_app()
+def answer(reply: tuple[int, str]):
+    status, body = reply
+    assert status in (200, 201, 202), reply
+    return json.loads(body)
 
-    # POST /process: 202 at once, although the cycle takes seconds.
-    began = time.monotonic()
+
+def paper(server, arxiv_id: str) -> dict:
+    return {p["arxiv_id"]: p for p in answer(server.get("/papers"))}.get(arxiv_id) or {}
+
+
+def wait_idle(server) -> dict:
+    return wait_until(lambda: (lambda s: s if not s["running"] else None)(answer(server.get("/status"))),
+                      timeout=120, what="the cycle to end")
+
+
+class Shared:
+    def __init__(self, home, world, app, at_start):
+        self.home, self.world, self.app, self.at_start = home, world, app, at_start
+
+
+@pytest.fixture(scope="module")
+def shared(tmp_path_factory):
+    """One server, scheduler off, for the trigger cases; what it showed right after its start."""
+    folder = tmp_path_factory.mktemp("cycles")
+    world = new_standin(folder / "standin", scenario={"feeds": {}})
+    home = use_test_database(new_home(folder / "home")).join(world).seeds("cs.AI")
+    app = new_server(home)
+    try:
+        yield Shared(home, world, app, (answer(app.get("/status")), world.counts()))
+    finally:
+        app.stop()
+        world.close()
+
+
+def test_triggers_answer_at_once_and_overlapping_triggers_share_one_cycle(shared):
+    app, world = shared.app, shared.world
+    # Started with the scheduler off, the server did nothing by itself.
+    status, counts = shared.at_start
+    assert status["run"] is None and status["running"] is False and counts == {}
+
+    world.scenario(feeds={"cs.AI": feed((A, 1, "new"))})
+    world.control(slow=4)
+    polled = world.counts().get("rss:cs.AI", 0)
+    # POST /process answers while the analysis is still being waited for.
     first = app.post("/process")
-    assert time.monotonic() - began < 1.5
-    assert first.status_code == 202
-    assert first.json()["started"] is True
-    run_id = first.json()["run_id"]
+    assert first[0] == 202, first
+    run_id = json.loads(first[1])["run_id"]
+    assert json.loads(first[1])["started"] is True
+    assert paper(app, A).get("status") != "done"
 
     # While it runs: no second cycle, the same run_id, started false.
-    status = app.status()
+    status = answer(app.get("/status"))
     assert status["running"] is True
     assert status["run"]["id"] == run_id and status["run"]["finished_at"] is None
-    again = app.post("/process")
-    assert again.status_code == 202
-    assert (again.json()["run_id"], again.json()["started"]) == (run_id, False)
+    again = answer(app.post("/process"))
+    assert (again["run_id"], again["started"]) == (run_id, False)
 
     # The refresh button does not hold its request either, and starts nothing on top.
-    began = time.monotonic()
-    refresh = app.post("/ui/refresh", follow_redirects=False)
-    assert time.monotonic() - began < 1.5
-    assert (refresh.status_code, refresh.headers["location"]) == (303, "/ui")
-    wait_until(lambda: (app.paper(A) or {}).get("status") == "processing", what="the paper to be in work")
-    assert app.status()["papers"] == {"pending": 0, "processing": 1, "done": 0, "failed": 0}
-    third = app.post("/process").json()
+    refresh = app.post("/ui/refresh")
+    assert refresh[0] == 303 and app.headers["location"] == "/ui"
+    assert paper(app, A).get("status") != "done"
+    wait_until(lambda: paper(app, A).get("status") == "processing", what="the paper to be in work")
+    assert answer(app.get("/status"))["papers"] == {"pending": 0, "processing": 1, "done": 0, "failed": 0}
+    third = answer(app.post("/process"))
     assert (third["run_id"], third["started"]) == (run_id, False)
     # the rest of the app answers while the cycle is busy
-    assert app.get("/ui").status_code == 200 and app.get("/papers").status_code == 200
+    assert app.get("/ui")[0] == 200 and app.get("/papers")[0] == 200
 
-    status = app.wait_idle()
+    status = wait_idle(app)
     run = status["run"]
     assert run["id"] == run_id and run["finished_at"] is not None
     assert (run["new_papers"], run["processed"], run["failed"]) == (1, 1, 0)
-    paper = app.paper(A)
-    assert (paper["status"], paper["attempts"]) == ("done", 1)
-    assert env.counts()[f"llm:{A}"] == 1 and env.counts()["rss:cs.AI"] == 1
+    assert (paper(app, A)["status"], paper(app, A)["attempts"]) == ("done", 1)
+    assert world.counts()[f"llm:{A}"] == 1 and world.counts()["rss:cs.AI"] == polled + 1
 
     # Once it is over, a trigger starts the next cycle, with the next id.
-    env.set_scenario(feeds={"cs.AI": feed((A, 1, "new"), (B, 1, "new"))})
-    refresh = app.post("/ui/refresh", follow_redirects=False)
-    assert refresh.status_code == 303
-    status = app.wait_idle()
+    world.control()
+    world.scenario(feeds={"cs.AI": feed((A, 1, "new"), (B, 1, "new"))})
+    assert app.post("/ui/refresh")[0] == 303
+    status = wait_idle(app)
     assert status["run"]["id"] > run_id and status["run"]["new_papers"] == 1
-    assert app.paper(B)["status"] == "done"
-    assert f"Paper {B}" in app.get("/ui").text
+    assert paper(app, B)["status"] == "done"
+    assert f"Paper {B}" in app.get("/ui")[1]
 
     # Cycles are recorded in the database, one row each.
-    def runs(conn):
-        return conn.exec_driver_sql(
-            "SELECT id, new_papers, processed, failed, finished_at IS NOT NULL FROM runs ORDER BY id"
-        ).fetchall()
-
-    assert [tuple(r) for r in env.db(runs)] == [(run_id, 1, 1, 0, True), (status["run"]["id"], 1, 1, 0, True)]
+    if not shared.home.database_url:
+        assert shared.home.sql("SELECT id, new_papers, processed, failed, finished_at IS NOT NULL FROM runs "
+                               "ORDER BY id")[-2:] == [(run_id, 1, 1, 0, 1), (status["run"]["id"], 1, 1, 0, 1)]
 
 
-def test_scheduler_is_on_by_default_and_its_cycle_is_a_cycle_like_any_other(env):
+def test_scheduler_is_on_by_default_and_its_cycle_is_a_cycle_like_any_other(home, standin, server):
+    world = standin(scenario={"feeds": {"cs.AI": feed((A, 1, "new"))}})
+    world.control(slow=3)
+    home.join(world).seeds("cs.AI")
     # No SCHEDULER_ENABLED at all: the scheduler runs a cycle at startup, nobody has to ask.
-    env.set_scenario(feeds={"cs.AI": feed((A, 1, "new"))}, slow=3)
-    env.set_yaml_categories(["cs.AI"])
-    app = env.start_app(SCHEDULER_ENABLED=None)
-    wait_until(lambda: (app.paper(A) or {}).get("status") == "processing", what="the startup cycle")
-    status = app.status()
+    app = server(home, SCHEDULER_ENABLED=None)
+    wait_until(lambda: paper(app, A).get("status") == "processing", what="the startup cycle")
+    status = answer(app.get("/status"))
     assert status["running"] is True and status["run"]["id"] == 1
 
     # A manual trigger on top of the scheduled cycle joins it instead of starting another.
-    answer = app.start_cycle()
-    assert (answer["run_id"], answer["started"]) == (1, False)
-    status = app.wait_idle()
+    joined = answer(app.post("/process"))
+    assert (joined["run_id"], joined["started"]) == (1, False)
+    status = wait_idle(app)
     assert status["run"]["id"] == 1 and (status["run"]["new_papers"], status["run"]["processed"]) == (1, 1)
-    assert (app.paper(A)["status"], app.paper(A)["attempts"]) == ("done", 1)
-    assert env.counts()[f"llm:{A}"] == 1
+    assert (paper(app, A)["status"], paper(app, A)["attempts"]) == ("done", 1)
+    assert world.counts()[f"llm:{A}"] == 1
 
-    # With SCHEDULER_ENABLED=false the same start does nothing by itself.
-    app.stop()
-    env.set_scenario(feeds={"cs.AI": feed((A, 1, "new"), (B, 1, "new"))})
-    app = env.start_app()
-    time.sleep(1.5)
-    assert app.status()["run"]["id"] == 1 and app.paper(B) is None
-    assert app.cycle()["id"] == 2 and app.paper(B)["status"] == "done"
+    # The next trigger starts a cycle of its own, which does what any cycle does.
+    world.control()
+    world.scenario(feeds={"cs.AI": feed((A, 1, "new"), (B, 1, "new"))})
+    started = answer(app.post("/process"))
+    assert (started["run_id"], started["started"]) == (2, True)
+    status = wait_idle(app)
+    assert status["run"]["id"] == 2 and (status["run"]["new_papers"], status["run"]["processed"]) == (1, 1)
+    assert paper(app, B)["status"] == "done" and world.counts()[f"llm:{A}"] == 1
 
 
-def test_adding_a_category_starts_a_cycle_in_the_background(env):
-    env.set_scenario(feeds={"cs.AI": feed((A, 1, "new")), "cs.LG": feed((B, 1, "new")),
-                            "cs.CV": feed((C, 1, "new"))}, slow=2)
-    app = env.start_app()
+def test_adding_a_category_starts_a_cycle_in_the_background(shared):
+    app, world = shared.app, shared.world
+    world.scenario(feeds={"cs.AI": [], "cs.LG": feed((C, 1, "new")), "cs.CV": feed((D, 1, "new")),
+                          "math.CO": feed((E, 1, "new"))})
+    world.control(slow=3)
 
-    # Through the API
-    began = time.monotonic()
-    created = app.post("/categories", json={"arxiv_code": "cs.AI", "name": "AI"})
-    assert time.monotonic() - began < 1.5
-    assert created.status_code == 201 and created.json()["name"] == "AI"
-    assert app.status()["running"] is True
+    # Through the API: answered while the analysis is still being waited for.
+    created = app.post("/categories", json={"arxiv_code": "cs.LG", "name": "LG"})
+    assert created[0] == 201 and json.loads(created[1])["name"] == "LG"
+    assert answer(app.get("/status"))["running"] is True
+    assert paper(app, C).get("status") != "done"
 
-    # Through the UI, while that cycle is still running: answered at once as well, and the new
+    # Through the page, while that cycle is still running: answered at once as well, and the new
     # feed is polled by a cycle that follows the running one.
-    began = time.monotonic()
-    added = app.post("/ui/categories/add", data={"arxiv_code": " cs.LG "}, follow_redirects=False)
-    assert time.monotonic() - began < 1.5
-    assert (added.status_code, added.headers["location"]) == (303, "/ui/categories")
-    assert set(app.categories()) == {"cs.AI", "cs.LG"}
+    added = app.post("/ui/categories/add", form={"arxiv_code": " cs.CV "})
+    assert added[0] == 303 and app.headers["location"] == "/ui/categories"
+    assert {"cs.LG", "cs.CV"} <= {c["arxiv_code"] for c in answer(app.get("/categories"))}
+    assert paper(app, C).get("status") != "done"
 
-    status = app.wait_idle()
-    papers = app.by_arxiv_id()
-    assert set(papers) == {A, B}
-    assert [(papers[i]["status"], papers[i]["attempts"]) for i in (A, B)] == [("done", 1)] * 2
-    assert status["papers"]["done"] == 2
-    assert env.counts()[f"llm:{A}"] == 1 and env.counts()[f"llm:{B}"] == 1
+    wait_until(lambda: paper(app, D).get("status") == "done", timeout=120, what="the paper of the second feed")
+    wait_idle(app)
+    assert [(paper(app, i)["status"], paper(app, i)["attempts"]) for i in (C, D)] == [("done", 1)] * 2
+    assert world.counts()[f"llm:{C}"] == 1 and world.counts()[f"llm:{D}"] == 1
 
-    # Through the UI with nothing running; adding it twice changes nothing.
-    env.set_scenario(feeds={"cs.CV": feed((C, 1, "new"))})
-    added = app.post("/ui/categories/add", data={"arxiv_code": "cs.CV"}, follow_redirects=False)
-    assert added.status_code == 303
-    app.post("/ui/categories/add", data={"arxiv_code": "cs.CV"}, follow_redirects=False)
-    app.wait_idle()
-    assert set(app.categories()) == {"cs.AI", "cs.LG", "cs.CV"}
-    assert app.paper(C)["status"] == "done" and len(app.papers()) == 3
+    # Through the page with nothing running; adding it twice changes nothing.
+    world.control()
+    assert app.post("/ui/categories/add", form={"arxiv_code": "math.CO"})[0] == 303
+    assert app.post("/ui/categories/add", form={"arxiv_code": "math.CO"})[0] == 303
+    wait_until(lambda: paper(app, E).get("status") == "done", timeout=120, what="the paper of the third feed")
+    wait_idle(app)
+    codes = [c["arxiv_code"] for c in answer(app.get("/categories"))]
+    assert {"cs.LG", "cs.CV", "math.CO"} <= set(codes) and codes.count("math.CO") == 1
+    assert world.counts()[f"llm:{E}"] == 1

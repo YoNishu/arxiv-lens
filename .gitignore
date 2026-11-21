@@ -4,6 +4,12 @@ __pycache__/
 .venv/
 venv/
 data/
+home/
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.tmp
 *.egg-info/
 dist/
 build/

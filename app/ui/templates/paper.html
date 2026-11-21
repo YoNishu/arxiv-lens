@@ -10,15 +10,34 @@
             {{ paper.analysis.novelty_score }}/10
         </span>
         {% endif %}
-        <span class="category-tag">{{ paper.category.arxiv_code if paper.category else 'N/A' }}</span>
+        {% for feed in feeds %}
+        <span class="category-tag">{{ feed }}</span>
+        {% endfor %}
         <span class="status-badge {{ paper.status.value }}">{{ paper.status.value }}</span>
+        {% if paper.withdrawn_at %}
+        <span class="status-badge failed">withdrawn</span>
+        {% endif %}
     </div>
 
     <h1>{{ paper.title }}</h1>
     <p class="authors">{{ paper.authors | join(', ') }}</p>
-    <p class="date">Published {{ paper.published_at.strftime('%B %d, %Y') }} · arXiv: <a href="https://arxiv.org/abs/{{ paper.arxiv_id }}" target="_blank">{{ paper.arxiv_id }}</a></p>
+    <p class="date">Published {{ paper.published_at.strftime('%B %d, %Y') }} · arXiv: <a href="https://arxiv.org/abs/{{ paper.arxiv_id }}" target="_blank">{{ paper.arxiv_id }}</a> v{{ paper.version }}</p>
+
+    {% if paper.status.value == 'failed' %}
+    <div class="error-box">
+        <h2>Processing Failed</h2>
+        <p>{{ paper.error_message or 'Unknown error' }}</p>
+        <p>Attempts: {{ paper.attempts }}</p>
+        <form method="post" action="/ui/paper/{{ paper.id }}/retry">
+            <button type="submit" class="btn btn-primary btn-sm">Retry</button>
+        </form>
+    </div>
+    {% endif %}
 
     {% if paper.analysis %}
+    {% if paper.analysis.paper_version < paper.version %}
+    <p class="hint">This analysis describes version {{ paper.analysis.paper_version }}; the paper is now at version {{ paper.version }}.</p>
+    {% endif %}
     <section class="detail-section">
         <h2>Summary</h2>
         <p>{{ paper.analysis.summary }}</p>
@@ -58,20 +77,31 @@
         <h2>Abstract</h2>
         <blockquote>{{ paper.abstract }}</blockquote>
     </section>
-
-    <section class="detail-section collapsible">
-        <h2 onclick="this.parentElement.classList.toggle('open')">Full Extracted Text ▸</h2>
-        <pre class="full-text">{{ paper.analysis.full_text[:10000] }}{% if paper.analysis.full_text | length > 10000 %}… [truncated]{% endif %}</pre>
-    </section>
-    {% elif paper.status.value == 'failed' %}
-    <div class="error-box">
-        <h2>Processing Failed</h2>
-        <p>{{ paper.error_message or 'Unknown error' }}</p>
+    {% elif paper.withdrawn_at %}
+    <div class="empty-state">
+        <p>This paper was withdrawn and is not analysed.</p>
     </div>
-    {% else %}
+    {% elif paper.status.value != 'failed' %}
     <div class="empty-state">
         <p>Paper is {{ paper.status.value }}. Check back after processing completes.</p>
     </div>
     {% endif %}
+
+    {% if text %}
+    <section class="detail-section collapsible">
+        <h2 onclick="this.parentElement.classList.toggle('open')">Full Extracted Text ▸</h2>
+        <pre class="full-text">{{ text }}{% if text_cut %}… [truncated]{% endif %}</pre>
+    </section>
+    {% endif %}
+
+    <section class="detail-section">
+        <h2>Timeline</h2>
+        <ul>
+            {% for event in timeline %}
+            <li>{{ event.at.strftime('%Y-%m-%d %H:%M') }} {{ event.kind }} v{{ event.version }}{% if event.feed %} {{ event.feed }}{% endif %}</li>
+            {% endfor %}
+        </ul>
+    </section>
+    {% include "paper_related.html" %}
 </div>
 {% endblock %}

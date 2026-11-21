@@ -1,16 +1,27 @@
+"""The pages under /ui: digest, categories, browsing, one paper, chat.
+
+The paper page shows what the database knows of a paper (its versions' story in the timeline,
+its stored text) and, when insights have been built, its related papers.
+"""
 import logging
 
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from app.db import crud
-from app.services import cycle
+from app import home, ids
+from app.db import crud, history
+from app.insights import store
+from app.services import cycle, textstore
 
 logger = logging.getLogger(__name__)
 
 ui_router = APIRouter(prefix="/ui")
-templates = Jinja2Templates(directory="app/ui/templates")
+# Found through the project folder, so the server starts from any working directory.
+templates = Jinja2Templates(directory=home.ROOT / "app" / "ui" / "templates")
+
+# The paper page shows this much of a stored text.
+TEXT_PREVIEW_CHARS = 10_000
 
 
 @ui_router.get("", response_class=HTMLResponse)
@@ -41,10 +52,14 @@ async def categories_page(request: Request):
 
 @ui_router.post("/categories/add")
 async def add_category_form(request: Request, arxiv_code: str = Form(...)):
-    logger.info("POST /ui/categories/add — code=%s", arxiv_code.strip())
-    existing = await crud.get_category_by_code(arxiv_code.strip())
+    code = arxiv_code.strip()
+    logger.info("POST /ui/categories/add — code=%s", code)
+    if not ids.is_category_code(code):
+        logger.warning("Not a category code: %s", arxiv_code)
+        return RedirectResponse("/ui/categories", status_code=303)
+    existing = await crud.get_category_by_code(code)
     if not existing:
-        await crud.create_category(name=arxiv_code.strip(), arxiv_code=arxiv_code.strip())
+        await crud.create_category(name=code, arxiv_code=code)
         # Poll the new feed in the background; if a cycle is running, one more follows it.
         await cycle.start_cycle(queue_if_running=True)
     return RedirectResponse("/ui/categories", status_code=303)
@@ -85,6 +100,20 @@ async def browse_papers_page(
     )
 
 
+async def _feeds_of(paper) -> list[str]:
+    """The codes of the categories whose feeds listed the paper, sorted."""
+    codes = {c.id: c.arxiv_code for c in await crud.get_all_categories()}
+    return sorted(codes[i] for i in paper.category_ids if i in codes)
+
+
+def _stored_text(paper) -> str | None:
+    """The text of the current version, or else the one the stored analysis was made from."""
+    text = textstore.read(paper.arxiv_id, paper.version)
+    if text is None and paper.analysis is not None and paper.analysis.paper_version != paper.version:
+        text = textstore.read(paper.arxiv_id, paper.analysis.paper_version)
+    return text
+
+
 @ui_router.get("/paper/{paper_id}", response_class=HTMLResponse)
 async def paper_detail_page(request: Request, paper_id: int):
     logger.debug("GET /ui/paper/%d", paper_id)
@@ -92,7 +121,31 @@ async def paper_detail_page(request: Request, paper_id: int):
     if not paper:
         logger.warning("Paper %d not found", paper_id)
         return HTMLResponse("Paper not found", status_code=404)
-    return templates.TemplateResponse(request=request, name="paper.html", context={"paper": paper})
+    text = _stored_text(paper)
+    try:
+        related = store.related(paper.arxiv_id)
+    except store.NoResult:
+        related = None
+    return templates.TemplateResponse(
+        request=request,
+        name="paper.html",
+        context={
+            "paper": paper,
+            "feeds": await _feeds_of(paper),
+            "timeline": await history.timeline(paper.id),
+            "text": text[:TEXT_PREVIEW_CHARS] if text is not None else None,
+            "text_cut": text is not None and len(text) > TEXT_PREVIEW_CHARS,
+            "related": related,
+        },
+    )
+
+
+@ui_router.post("/paper/{paper_id}/retry")
+async def retry_paper_form(paper_id: int):
+    logger.info("POST /ui/paper/%d/retry", paper_id)
+    # A paper that is not failed (any more) is left as it is; the page shows its state.
+    await crud.retry_paper(paper_id)
+    return RedirectResponse(f"/ui/paper/{paper_id}", status_code=303)
 
 
 @ui_router.get("/chat", response_class=HTMLResponse)

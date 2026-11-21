@@ -1,7 +1,11 @@
+"""The model's analysis of one paper: the prompt, the request and the check of the answer.
+
+Whatever answers (the model endpoint over HTTP, or a corpus in-process), the analysis goes
+through checked() before it is stored, so both give the same values and fail with the same
+words.
+"""
 import json
 import logging
-
-from openai import AsyncAzureOpenAI
 
 from app.config import settings
 
@@ -34,10 +38,16 @@ class InvalidAnalysis(ValueError):
     """The model answered, but not with an analysis of the agreed shape."""
 
 
-def _get_client() -> AsyncAzureOpenAI:
+class ModelError(RuntimeError):
+    """The model endpoint gave no answer, or an error status instead of one."""
+
+
+def _get_client():
     # The SDK itself repeats a request that was rate-limited or hit a server error (twice, with
     # backoff). Anything beyond that fails this try of the paper, and a later cycle tries the
     # paper again (see app/services/processor.py) — there is no second retry loop in here.
+    from openai import AsyncAzureOpenAI
+
     return AsyncAzureOpenAI(
         azure_endpoint=settings.azure_openai_endpoint,
         api_key=settings.azure_openai_api_key,
@@ -78,12 +88,29 @@ def validate_analysis(data) -> None:
         raise InvalidAnalysis("Analysis has fields of the wrong type: " + "; ".join(problems))
 
 
-async def analyze_paper(full_text: str, title: str = "", abstract: str = "") -> dict:
+def checked(data) -> dict:
+    """The analysis as it is stored: validated, the score a whole number from 1 to 10."""
+    validate_analysis(data)
+    # A copy: an in-process source hands over its own object, which must stay as it is.
+    data = dict(data)
+    data["novelty_score"] = max(1, min(10, int(data["novelty_score"])))
+    data.setdefault("limitations", None)
+    return data
+
+
+async def analyze_paper(arxiv_id: str, version: int, title: str, abstract: str, full_text: str) -> dict:
+    import openai
+
     truncated = full_text[:MAX_TEXT_CHARS]
     if len(full_text) > MAX_TEXT_CHARS:
         logger.warning("Truncated text from %d to %d chars", len(full_text), MAX_TEXT_CHARS)
 
-    user_content = f"Paper title: {title}\n\nAbstract: {abstract}\n\nFull text:\n{truncated}"
+    # The first line names the paper and its version, so an answering service never has to
+    # recognise a paper by its title.
+    user_content = (
+        f"arXiv: {arxiv_id}v{version}\nPaper title: {title}\n\nAbstract: {abstract}\n\n"
+        f"Full text:\n{truncated}"
+    )
 
     client = _get_client()
     try:
@@ -96,13 +123,18 @@ async def analyze_paper(full_text: str, title: str = "", abstract: str = "") -> 
             response_format={"type": "json_object"},
             temperature=0.3,
         )
+    except openai.APIStatusError as e:
+        raise ModelError(f"Model request failed with status {e.status_code}") from e
+    except openai.APIConnectionError as e:
+        raise ModelError(f"Model request failed: {type(e).__name__}") from e
     finally:
         await client.close()
-    raw = resp.choices[0].message.content
-    data = json.loads(raw)
-    validate_analysis(data)
 
-    data["novelty_score"] = max(1, min(10, int(data["novelty_score"])))
-    data.setdefault("limitations", None)
-    logger.info("Analysis complete for '%s' — score %d", title[:60], data["novelty_score"])
+    raw = resp.choices[0].message.content
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        raise InvalidAnalysis("Analysis is not valid JSON") from None
+    data = checked(data)
+    logger.info("Analysis complete for %sv%d, score %d", arxiv_id, version, data["novelty_score"])
     return data

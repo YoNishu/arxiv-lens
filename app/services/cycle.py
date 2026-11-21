@@ -1,16 +1,19 @@
 """The poll-and-process cycle and its bookkeeping.
 
-A process runs one cycle at a time. Whoever asks for a cycle (the scheduler, POST /process, the
-refresh button, a new category) gets an answer at once: the cycle runs as a background task and
-is recorded as a row of the runs table. Several processes may share a database; what keeps a
-paper from being analysed twice is the claim in app/services/processor.py, not this module.
+run_cycle() is the one way a cycle runs, whoever asks for it: the command line awaits it, the
+server and its scheduler start it as a background task through start_cycle(), so every request
+is answered at once. Each cycle is a row of the runs table with one run_feeds row per feed.
+Several processes may share a database; what keeps a paper from being analysed twice is the
+claim in app/services/processor.py, not this module.
 """
 import asyncio
 import logging
-from datetime import datetime, timezone
 
+from app import clock
 from app.db import crud
+from app.db.models import Run
 from app.services import feed_poller, processor
+from app.services.sources import current as current_sources
 
 logger = logging.getLogger(__name__)
 
@@ -21,14 +24,67 @@ _rerun_requested = False
 _stopping = False
 _followups: set[asyncio.Task] = set()
 
+_COUNTS = ("new_papers", "updated", "skipped", "processed", "failed")
+
+
+async def run_cycle(sources=None, run_id: int | None = None) -> Run:
+    """Poll every feed, then analyse every paper that is due. Returns the run as stored.
+
+    A failing feed or paper is recorded where it happened and the cycle goes on; only an error
+    that stops the whole cycle is recorded as the run's error.
+    """
+    await crud.close_abandoned_runs()
+    if run_id is None:
+        run_id = (await crud.create_run()).id
+    totals = dict.fromkeys(_COUNTS, 0)
+    error: str | None = None
+    logger.info("Cycle %d: starting poll and process", run_id)
+
+    async def polled(stats: feed_poller.FeedStats) -> None:
+        await crud.add_run_feed(
+            run_id, stats.feed, stats.listed, stats.new_papers, stats.updated, stats.skipped,
+            stats.error_message,
+        )
+        totals["new_papers"] += stats.new_papers
+        totals["updated"] += stats.updated
+        totals["skipped"] += stats.skipped
+        await crud.update_run(run_id, **totals)
+
+    async def worked(stats: processor.ProcessStats) -> None:
+        totals.update(processed=stats.processed, failed=stats.failed)
+        await crud.update_run(run_id, **totals)
+
+    try:
+        if sources is None:
+            sources = current_sources()
+        await crud.seed_categories(sources.seed_categories())
+        await feed_poller.poll_all(sources, on_feed=polled)
+        logger.info(
+            "Cycle %d: %d new papers, %d updated, %d skipped",
+            run_id, totals["new_papers"], totals["updated"], totals["skipped"],
+        )
+        await processor.process_pending_papers(sources, on_progress=worked)
+        logger.info("Cycle %d: %d processed, %d failed", run_id, totals["processed"], totals["failed"])
+    except asyncio.CancelledError:
+        error = "Cycle was stopped before it finished"
+        raise
+    except Exception as e:
+        logger.exception("Cycle %d failed", run_id)
+        error = (str(e) or type(e).__name__)[:500]
+    finally:
+        try:
+            # Shielded: a cancelled cycle still records how it ended.
+            await asyncio.shield(
+                crud.update_run(run_id, finished_at=clock.now(), error_message=error, **totals)
+            )
+        except BaseException:
+            logger.warning("Could not record the end of cycle %d", run_id, exc_info=True)
+    return await crud.get_run(run_id)
+
 
 def is_running() -> bool:
     # A queued follow-up cycle counts: there is no idle moment between the two.
     return _current_run_id is not None or bool(_followups)
-
-
-def current_run_id() -> int | None:
-    return _current_run_id
 
 
 async def start_cycle(queue_if_running: bool = False) -> tuple[int, bool]:
@@ -47,7 +103,7 @@ async def start_cycle(queue_if_running: bool = False) -> tuple[int, bool]:
             return _current_run_id, False
         run = await crud.create_run()
         _current_run_id = run.id
-        _current_task = asyncio.create_task(_run_cycle(run.id), name=f"cycle-{run.id}")
+        _current_task = asyncio.create_task(_in_background(run.id), name=f"cycle-{run.id}")
         return run.id, True
 
 
@@ -69,46 +125,18 @@ async def shutdown() -> None:
         await asyncio.wait(tasks, timeout=30)
 
 
-async def _run_cycle(run_id: int) -> None:
+async def _in_background(run_id: int) -> None:
     global _current_run_id, _current_task, _rerun_requested
-    counts = {"new_papers": 0, "updated": 0, "skipped": 0, "processed": 0, "failed": 0}
-    error: str | None = None
     cancelled = False
-    logger.info("Cycle %d: starting poll and process", run_id)
-
-    async def polled(stats: feed_poller.PollStats) -> None:
-        counts.update(new_papers=stats.new_papers, updated=stats.updated, skipped=stats.skipped)
-        await crud.update_run(run_id, **counts)
-
-    async def worked(stats: processor.ProcessStats) -> None:
-        counts.update(processed=stats.processed, failed=stats.failed)
-        await crud.update_run(run_id, **counts)
-
     try:
-        await feed_poller.sync_categories_from_yaml()
-        await feed_poller.poll_all(on_progress=polled)
-        logger.info(
-            "Cycle %d: %d new papers, %d updated, %d skipped",
-            run_id, counts["new_papers"], counts["updated"], counts["skipped"],
-        )
-        await processor.process_pending_papers(on_progress=worked)
-        logger.info("Cycle %d: %d processed, %d failed", run_id, counts["processed"], counts["failed"])
+        await run_cycle(run_id=run_id)
     except asyncio.CancelledError:
         cancelled = True
-        error = "Cycle was stopped before it finished"
         raise
-    except Exception as e:
-        logger.exception("Cycle %d failed", run_id)
-        error = (str(e) or type(e).__name__)[:500]
+    except Exception:
+        # The run row says what it can; the server keeps answering.
+        logger.exception("Cycle %d could not run", run_id)
     finally:
-        try:
-            await asyncio.shield(
-                crud.update_run(
-                    run_id, finished_at=datetime.now(timezone.utc), error_message=error, **counts
-                )
-            )
-        except BaseException:
-            logger.warning("Could not record the end of cycle %d", run_id, exc_info=True)
         _current_run_id = None
         _current_task = None
         if _rerun_requested and not cancelled and not _stopping:

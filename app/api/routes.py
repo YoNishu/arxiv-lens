@@ -1,9 +1,15 @@
+"""The REST routes: categories, papers, digest, cycles and their status, conversations, chat.
+
+A route that starts a cycle answers at once; the cycle runs in the background (see
+app/services/cycle.py) and GET /status shows how far it got.
+"""
 import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
+from app import ids
 from app.api.schemas import (
     AnalysisResponse,
     CategoryCreate,
@@ -34,13 +40,16 @@ async def list_categories():
 
 @router.post("/categories", response_model=CategoryResponse, status_code=201)
 async def add_category(body: CategoryCreate):
-    logger.info("POST /categories — arxiv_code=%s", body.arxiv_code)
-    existing = await crud.get_category_by_code(body.arxiv_code)
+    code = body.arxiv_code.strip()
+    logger.info("POST /categories — arxiv_code=%s", code)
+    if not ids.is_category_code(code):
+        raise HTTPException(422, f"Not a category code: {body.arxiv_code}")
+    existing = await crud.get_category_by_code(code)
     if existing:
-        raise HTTPException(409, f"Already subscribed to {body.arxiv_code}")
+        raise HTTPException(409, f"Already subscribed to {code}")
     cat = await crud.create_category(
-        name=body.name or body.arxiv_code,
-        arxiv_code=body.arxiv_code,
+        name=body.name or code,
+        arxiv_code=code,
         description=body.description,
     )
     # Poll the new feed in the background; if a cycle is running, one more follows it.
@@ -51,7 +60,8 @@ async def add_category(body: CategoryCreate):
 @router.delete("/categories/{category_id}", status_code=204)
 async def remove_category(category_id: int):
     logger.info("DELETE /categories/%d", category_id)
-    await crud.delete_category(category_id)
+    if await crud.delete_category(category_id) is None:
+        raise HTTPException(404, "Category not found")
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +74,10 @@ async def list_papers(
     status: str | None = Query(None),
 ):
     logger.debug("GET /papers category_id=%s status=%s", category_id, status)
-    return await crud.get_papers(category_id=category_id, status=status)
+    try:
+        return await crud.get_papers(category_id=category_id, status=status)
+    except ValueError:
+        raise HTTPException(422, f"Unknown status: {status}") from None
 
 
 @router.get("/papers/{paper_id}/analysis", response_model=AnalysisResponse)
@@ -145,10 +158,9 @@ async def status():
 
 @router.get("/last-updated")
 async def last_updated():
-    papers = await crud.get_daily_digest()
-    if papers and papers[0].analysis:
-        return {"last_updated": papers[0].analysis.created_at.isoformat()}
-    return {"last_updated": None}
+    """When the newest analysis was stored."""
+    newest = await crud.get_last_analysis_time()
+    return {"last_updated": newest.isoformat() if newest else None}
 
 
 # ---------------------------------------------------------------------------

@@ -1,3 +1,9 @@
+"""Analysing stored papers: claim, text, analysis, completion.
+
+A paper is claimed in the database before anyone works on it, so of all cycles and processes
+that reach for it only one does. Its text is kept in the text store before the model is asked,
+so a failed model call never costs the PDF a second time.
+"""
 import asyncio
 import logging
 import uuid
@@ -5,7 +11,7 @@ from dataclasses import dataclass
 
 from app.config import settings
 from app.db import crud
-from app.services import pdf_extractor, paper_analyzer
+from app.services import pdf_extractor, textstore
 
 logger = logging.getLogger(__name__)
 
@@ -40,68 +46,65 @@ async def _keep_lease(paper_id: int, token: str) -> None:
             logger.warning("Could not renew the lease of paper %d", paper_id, exc_info=True)
 
 
-async def process_paper(paper_id: int) -> str:
+async def process_paper(paper_id: int, sources) -> str:
     """Analyse one paper, if this worker can take it. Returns one of the outcomes above.
 
-    The claim is atomic in the database, so of all cycles and processes that reach for a paper
-    only one works on it. Every claim counts as a try in papers.attempts.
-
-    If the worker is stopped mid-way (shutdown, kill), the paper stays in work without anyone
-    renewing its lease, and a later cycle of any process takes it over.
+    Every claim counts as a try in papers.attempts. If the worker is stopped mid-way (shutdown,
+    kill), the paper stays in work without anyone renewing its lease, and a later cycle of any
+    process takes it over.
     """
     token = uuid.uuid4().hex
     paper = await crud.claim_paper(paper_id, token)
     if paper is None:
         return NOT_CLAIMED
 
-    use_blob = pdf_extractor.blob_storage_configured()
-    blob_name = f"paper_{paper_id}.pdf"
-    local_path = None
-    lease = asyncio.create_task(_keep_lease(paper_id, token))
-
+    blob_name = f"paper_{paper.id}.pdf"
+    staged = False
+    lease = asyncio.create_task(_keep_lease(paper.id, token))
     try:
-        local_path = await pdf_extractor.download_pdf(paper.pdf_url, paper_id, tag=token[:8])
-        if use_blob:
-            await pdf_extractor.upload_to_blob(local_path, blob_name)
+        text = await textstore.get(paper)
+        if text is None:
+            data = await sources.pdf(paper)
+            if pdf_extractor.blob_storage_configured():
+                # Marked before the upload: a half-finished upload is deleted as well.
+                staged = True
+                await pdf_extractor.upload_to_blob(data, blob_name)
+            # In a thread: a large PDF must not stop the event loop, which renews the lease.
+            text = await asyncio.to_thread(pdf_extractor.extract_text, data)
+            extraction = "pdf"
+            if not text.strip():
+                logger.warning("Empty text extraction for paper %d", paper.id)
+                text = textstore.PLACEHOLDER + paper.abstract
+                extraction = "abstract"
+            await textstore.put(paper, text, extraction)
 
-        # In a thread: a large PDF must not stop the event loop, which renews the lease.
-        full_text = await asyncio.to_thread(pdf_extractor.extract_text, local_path)
-        if not full_text.strip():
-            logger.warning("Empty text extraction for paper %d", paper_id)
-            full_text = f"[Text extraction failed — abstract only]\n\n{paper.abstract}"
-
-        analysis = await paper_analyzer.analyze_paper(
-            full_text, title=paper.title, abstract=paper.abstract
-        )
-
-        if await crud.complete_paper(paper_id, token, full_text, analysis):
-            logger.info("Paper %d processed successfully", paper_id)
+        analysis = await sources.analysis(paper, text)
+        if await crud.complete_paper(paper.id, token, paper.version, analysis):
+            logger.info("Paper %d processed successfully", paper.id)
             return DONE
-        logger.warning("Paper %d was taken over meanwhile; its analysis was not stored", paper_id)
+        logger.warning("Paper %d was taken over meanwhile; its analysis was not stored", paper.id)
         return LOST
 
     except Exception as e:
-        logger.exception("Failed to process paper %d", paper_id)
+        logger.exception("Failed to process paper %d", paper.id)
         message = (str(e) or type(e).__name__)[:500]
-        if await crud.fail_paper(paper_id, token, message):
+        if await crud.fail_paper(paper.id, token, message):
             return FAILED
         return LOST
     finally:
         lease.cancel()
-        if local_path:
-            pdf_extractor.cleanup_local_files(local_path)
-        if use_blob:
+        if staged:
             await pdf_extractor.delete_blob(blob_name)
 
 
-async def process_pending_papers(on_progress=None) -> ProcessStats:
+async def process_pending_papers(sources, on_progress=None) -> ProcessStats:
     """Try every paper that is due: pending, failed with tries left, or abandoned mid-way."""
     stats = ProcessStats()
     paper_ids = await crud.get_claimable_paper_ids()
     logger.info("Processing %d papers", len(paper_ids))
     for paper_id in paper_ids:
         try:
-            outcome = await process_paper(paper_id)
+            outcome = await process_paper(paper_id, sources)
         except Exception:
             # e.g. the database went away; the lease lets a later cycle pick the paper up
             logger.exception("Processing of paper %d was cut short", paper_id)

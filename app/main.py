@@ -1,16 +1,24 @@
+"""The web application: REST routes, pages, the MCP server, and the scheduler's cycles.
+
+At start the database is made ready (created, or upgraded in place), and runs left open by a
+process that died are closed, so /status never shows a cycle that nobody is running.
+"""
 import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
+from app import home
+from app.api.insights_routes import router as insights_router
 from app.api.routes import router as api_router
 from app.config import settings
-from app.db import migrate
-from app.db.database import engine
+from app.db import crud
+from app.db.database import engine, open_database
 from app.mcp.server import mcp
 from app.scheduler.tasks import start_scheduler, stop_scheduler
 from app.services import cycle
+from app.ui.insights_views import insights_ui_router
 from app.ui.views import ui_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -31,9 +39,11 @@ async def lifespan(app: FastAPI):
     logger.info("Poll interval: %dh", settings.poll_interval_hours)
 
     # Creates the tables, or upgrades a database written by an older version in place.
-    async with engine.begin() as conn:
-        await conn.run_sync(migrate.upgrade)
-    logger.info("Database tables created/verified")
+    for number, name in await open_database():
+        logger.info("Applied schema step %d %s", number, name)
+    closed = await crud.close_abandoned_runs()
+    if closed:
+        logger.info("Closed %d cycles left open by a process that stopped", closed)
 
     if settings.scheduler_enabled:
         start_scheduler()
@@ -54,7 +64,9 @@ app = FastAPI(title="ArxivLens", lifespan=lifespan)
 
 app.include_router(api_router)
 app.include_router(ui_router)
-app.mount("/static", StaticFiles(directory="app/ui/static"), name="static")
+app.include_router(insights_router)
+app.include_router(insights_ui_router)
+app.mount("/static", StaticFiles(directory=home.ROOT / "app" / "ui" / "static"), name="static")
 
 # Mount MCP server
 mcp_app = mcp.http_app(path="/mcp")

@@ -3,20 +3,19 @@ uvicorn[standard]>=0.30.0
 jinja2>=3.1.0
 
 # Database
-sqlalchemy[asyncio]>=2.0.0
+sqlalchemy[asyncio]>=2.0,<2.2
 asyncpg>=0.30.0
 aiosqlite>=0.20.0
-alembic>=1.14.0
 
 # AI — Azure OpenAI (AI Foundry)
-openai>=1.40.0
+openai>=1.40,<4
 
 # arXiv
-arxiv>=2.4.0
+arxiv>=2.4.0,<5
 feedparser>=6.0.0
 
 # PDF text extraction
-pymupdf>=1.24.0
+pymupdf>=1.24.3,<3
 
 # HTTP
 httpx>=0.27.0
@@ -36,4 +35,4 @@ pyyaml>=6.0.0
 apscheduler>=3.10.0
 
 # MCP
-fastmcp>=2.0.0
+fastmcp>=2.3,<5

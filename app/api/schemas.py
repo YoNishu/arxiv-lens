@@ -1,6 +1,11 @@
+"""Request and response models of the REST routes in app/api/routes.py.
+
+Responses are read straight from the database rows (from_attributes), so a model lists the
+columns a client gets to see.
+"""
 from datetime import datetime
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +45,7 @@ class CategoryResponse(BaseModel):
 
 class PaperResponse(BaseModel):
     id: int
+    # The paper's lowest linked category; category_ids lists all of them, ascending.
     category_id: int
     category_ids: list[int]
     arxiv_id: str
@@ -49,7 +55,10 @@ class PaperResponse(BaseModel):
     abstract: str
     pdf_url: str
     published_at: datetime
+    updated_at: datetime | None
     categories: list[str]
+    comment: str | None
+    withdrawn_at: datetime | None
     status: str
     attempts: int
     error_message: str | None
@@ -57,13 +66,16 @@ class PaperResponse(BaseModel):
 
     model_config = {"from_attributes": True}
 
-    @model_validator(mode="after")
-    def _first_category(self):
-        # category_id is the first of the categories the paper belongs to
-        self.category_ids = sorted(self.category_ids)
-        if self.category_ids:
-            self.category_id = self.category_ids[0]
-        return self
+
+class RunFeedResponse(BaseModel):
+    feed: str
+    listed: int
+    new_papers: int
+    updated: int
+    skipped: int
+    error_message: str | None
+
+    model_config = {"from_attributes": True}
 
 
 class RunResponse(BaseModel):
@@ -75,6 +87,9 @@ class RunResponse(BaseModel):
     skipped: int
     processed: int
     failed: int
+    error_message: str | None
+    # One row per feed the cycle polled, by feed code.
+    feeds: list[RunFeedResponse] = []
 
     model_config = {"from_attributes": True}
 
@@ -88,6 +103,8 @@ class StatusResponse(BaseModel):
 class AnalysisResponse(BaseModel):
     id: int
     paper_id: int
+    # The version of the paper this analysis was made from.
+    paper_version: int
     summary: str
     key_contributions: list[str]
     methodology: str
