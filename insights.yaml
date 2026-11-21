@@ -1,0 +1,32 @@
+# Settings of the insights build (python -m app insights config prints the values in force).
+# A file of the same name in the home folder overrides single values.
+text:
+  extra_stopwords: []
+  min_token_len: 3
+vocab:
+  min_df: 3
+  max_df_ratio: 0.4
+  min_reference: 100
+similar:
+  top_k: 10
+  probe_terms: 8
+  min_shared: 3
+  min_sim: 0.12
+citations:
+  damping: 0.85
+  list_size: 5
+topics:
+  iterations: 12
+  min_topic_sim: 0.08
+  card_terms: 10
+  exemplars: 5
+trends:
+  recent_weeks: 4
+  baseline_weeks: 8
+  top: 15
+ranking:
+  novelty: 0.6
+  grounding: 0.25
+  heat: 0.15
+digests:
+  top: 10
