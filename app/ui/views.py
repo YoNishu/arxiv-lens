@@ -5,8 +5,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from app.db import crud
-from app.services.feed_poller import poll_all_categories, poll_category, sync_categories_from_yaml
-from app.services.processor import process_pending_papers
+from app.services import cycle
 
 logger = logging.getLogger(__name__)
 
@@ -19,16 +18,18 @@ async def digest_page(request: Request):
     logger.debug("GET /ui — loading digest")
     papers = await crud.get_daily_digest()
     logger.info("Digest page: %d papers in last 24h", len(papers))
-    return templates.TemplateResponse(request=request, name="digest.html", context={"papers": papers})
+    return templates.TemplateResponse(
+        request=request, name="digest.html",
+        context={"papers": papers, "refreshing": cycle.is_running()},
+    )
 
 
 @ui_router.post("/refresh")
 async def refresh(request: Request):
     logger.info("POST /ui/refresh — manual refresh triggered")
-    await sync_categories_from_yaml()
-    await poll_all_categories()
-    await process_pending_papers()
-    logger.info("Manual refresh complete")
+    # The cycle runs in the background; the page comes back at once.
+    run_id, started = await cycle.start_cycle()
+    logger.info("Manual refresh: cycle %d %s", run_id, "started" if started else "already running")
     return RedirectResponse("/ui", status_code=303)
 
 
@@ -43,12 +44,9 @@ async def add_category_form(request: Request, arxiv_code: str = Form(...)):
     logger.info("POST /ui/categories/add — code=%s", arxiv_code.strip())
     existing = await crud.get_category_by_code(arxiv_code.strip())
     if not existing:
-        cat = await crud.create_category(name=arxiv_code.strip(), arxiv_code=arxiv_code.strip())
-        try:
-            await poll_category(cat.arxiv_code, cat.id)
-            await process_pending_papers()
-        except Exception:
-            logger.exception("Background processing failed")
+        await crud.create_category(name=arxiv_code.strip(), arxiv_code=arxiv_code.strip())
+        # Poll the new feed in the background; if a cycle is running, one more follows it.
+        await cycle.start_cycle(queue_if_running=True)
     return RedirectResponse("/ui/categories", status_code=303)
 
 

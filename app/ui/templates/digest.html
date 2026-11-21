@@ -12,6 +12,10 @@
     </div>
 </div>
 
+{% if refreshing %}
+<p class="hint">A refresh is running in the background. New papers appear here as they are analysed — reload the page to see them.</p>
+{% endif %}
+
 {% if papers %}
 <div class="paper-grid">
     {% for paper in papers %}

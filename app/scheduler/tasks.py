@@ -4,8 +4,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import settings
-from app.services.feed_poller import poll_all_categories, sync_categories_from_yaml
-from app.services.processor import process_pending_papers
+from app.services import cycle
 
 logger = logging.getLogger(__name__)
 
@@ -13,14 +12,14 @@ scheduler = AsyncIOScheduler()
 
 
 async def poll_and_process():
-    logger.info("Scheduler: starting poll and process cycle")
+    """Scheduled cycle. If a cycle is already running in this process, wait for that one."""
     try:
-        await sync_categories_from_yaml()
-        results = await poll_all_categories()
-        total = sum(results.values())
-        logger.info("Scheduler: found %d new papers across %d categories", total, len(results))
-        processed = await process_pending_papers()
-        logger.info("Scheduler: processed %d papers", processed)
+        run_id, started = await cycle.start_cycle()
+        if started:
+            logger.info("Scheduler: started cycle %d", run_id)
+        else:
+            logger.info("Scheduler: cycle %d is already running", run_id)
+        await cycle.wait_for_cycle()
     except Exception:
         logger.exception("Scheduler: poll_and_process failed")
 
@@ -39,5 +38,6 @@ def start_scheduler():
 
 
 def stop_scheduler():
-    scheduler.shutdown(wait=False)
+    if scheduler.running:
+        scheduler.shutdown(wait=False)
     logger.info("Scheduler stopped")

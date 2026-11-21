@@ -1,0 +1,4 @@
+-r requirements.txt
+
+# Tests (python -m pytest from the project root)
+pytest>=8.0.0

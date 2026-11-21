@@ -1,7 +1,7 @@
 import json
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 
 from app.api.schemas import (
@@ -12,10 +12,11 @@ from app.api.schemas import (
     ConversationCreate,
     DigestItem,
     PaperResponse,
+    RunResponse,
+    StatusResponse,
 )
 from app.db import crud
-from app.services import chat_agent, processor
-from app.services.feed_poller import poll_all_categories, poll_category, sync_categories_from_yaml
+from app.services import chat_agent, cycle
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,7 +33,7 @@ async def list_categories():
 
 
 @router.post("/categories", response_model=CategoryResponse, status_code=201)
-async def add_category(body: CategoryCreate, background: BackgroundTasks):
+async def add_category(body: CategoryCreate):
     logger.info("POST /categories — arxiv_code=%s", body.arxiv_code)
     existing = await crud.get_category_by_code(body.arxiv_code)
     if existing:
@@ -42,7 +43,8 @@ async def add_category(body: CategoryCreate, background: BackgroundTasks):
         arxiv_code=body.arxiv_code,
         description=body.description,
     )
-    background.add_task(_poll_and_process_category, cat.arxiv_code, cat.id)
+    # Poll the new feed in the background; if a cycle is running, one more follows it.
+    await cycle.start_cycle(queue_if_running=True)
     return cat
 
 
@@ -50,14 +52,6 @@ async def add_category(body: CategoryCreate, background: BackgroundTasks):
 async def remove_category(category_id: int):
     logger.info("DELETE /categories/%d", category_id)
     await crud.delete_category(category_id)
-
-
-async def _poll_and_process_category(arxiv_code: str, category_id: int):
-    try:
-        await poll_category(arxiv_code, category_id)
-        await processor.process_pending_papers()
-    except Exception:
-        logger.exception("Background poll+process failed for %s", arxiv_code)
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +77,18 @@ async def get_paper_analysis(paper_id: int):
     return analysis
 
 
+@router.post("/papers/{paper_id}/retry", response_model=PaperResponse, status_code=202)
+async def retry_paper(paper_id: int):
+    """Give a failed paper a fresh start: pending, with 0 attempts. The next cycle picks it up."""
+    logger.info("POST /papers/%d/retry", paper_id)
+    outcome = await crud.retry_paper(paper_id)
+    if outcome == "not_found":
+        raise HTTPException(404, "Paper not found")
+    if outcome == "not_failed":
+        raise HTTPException(409, "Only a failed paper can be retried")
+    return await crud.get_paper(paper_id)
+
+
 # ---------------------------------------------------------------------------
 # Digest & processing
 # ---------------------------------------------------------------------------
@@ -102,15 +108,39 @@ async def daily_digest():
     return items
 
 
-@router.post("/process")
+@router.post("/process", status_code=202)
 async def trigger_process():
+    """Start a poll+process cycle in the background and answer at once.
+
+    While a cycle is running in this process, no second one is started: the answer carries the
+    running cycle's run_id and started=false. Progress and results are in GET /status.
+    """
     logger.info("POST /process — manual poll+process triggered")
-    await sync_categories_from_yaml()
-    results = await poll_all_categories()
-    processed = await processor.process_pending_papers()
-    total_new = sum(results.values())
-    logger.info("Manual process complete: %d new papers found, %d processed", total_new, processed)
-    return {"message": "Done", "new_papers_found": total_new, "papers_processed": processed}
+    run_id, started = await cycle.start_cycle()
+    run = await crud.get_run(run_id)
+    return {
+        "message": "Cycle started" if started else "A cycle is already running",
+        "run_id": run_id,
+        "started": started,
+        # Counters of the cycle so far (it has only just begun when started is true).
+        "new_papers_found": run.new_papers if run else 0,
+        "papers_processed": run.processed if run else 0,
+    }
+
+
+@router.get("/status", response_model=StatusResponse)
+async def status():
+    """Whether a cycle is running in this process, paper counts per status, the latest cycle."""
+    # Read `running` before the database: a cycle writes its end to the runs table before it
+    # stops counting as running, so running=false always comes with the finished record.
+    running = cycle.is_running()
+    run = await crud.get_latest_run()
+    papers = await crud.count_papers_by_status()
+    return StatusResponse(
+        running=running,
+        papers=papers,
+        run=RunResponse.model_validate(run) if run else None,
+    )
 
 
 @router.get("/last-updated")

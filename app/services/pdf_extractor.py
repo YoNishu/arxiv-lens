@@ -9,12 +9,17 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = Path(settings.data_dir)
 
 
-async def download_pdf(pdf_url: str, paper_id: int) -> Path:
-    local_path = DATA_DIR / f"paper_{paper_id}.pdf"
+def blob_storage_configured() -> bool:
+    """PDFs are staged in blob storage only when a connection string or an account is set."""
+    return settings.blob_storage_configured
+
+
+async def download_pdf(pdf_url: str, paper_id: int, tag: str = "") -> Path:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    local_path = DATA_DIR / (f"paper_{paper_id}_{tag}.pdf" if tag else f"paper_{paper_id}.pdf")
     async with httpx.AsyncClient(follow_redirects=True, timeout=300) as client:
         resp = await client.get(pdf_url)
         resp.raise_for_status()
