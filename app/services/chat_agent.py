@@ -7,11 +7,14 @@ from openai import AsyncAzureOpenAI
 from app.config import settings
 from app.db import crud
 from app.db.models import MessageRole
+from app.insights import store
 
 logger = logging.getLogger(__name__)
 
-MODEL = None  # uses settings.azure_openai_deployment
 MAX_TOOL_ROUNDS = 5
+# Lists in the texts of the insights tools stop here, with a line saying how many were left out.
+LIST_LIMIT = 10
+NO_INSIGHTS = "No insights have been built yet."
 
 # ---------------------------------------------------------------------------
 # Tool definitions (OpenAI function-calling format)
@@ -100,12 +103,75 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_related_papers",
+            "description": "Get papers similar to a paper, the papers it cites and the papers that cite it.",
+            "parameters": {
+                "type": "object",
+                "properties": {"paper_id": {"type": "integer", "description": "Paper ID"}},
+                "required": ["paper_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_topic",
+            "description": "List the research topics of the library, or describe one topic by its number.",
+            "parameters": {
+                "type": "object",
+                "properties": {"topic": {"type": "integer", "description": "Topic number"}},
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_trends",
+            "description": "Get rising terms, bursts and topic momentum for a subscribed category (e.g., cs.LG).",
+            "parameters": {
+                "type": "object",
+                "properties": {"feed": {"type": "string", "description": "arXiv category code"}},
+                "required": ["feed"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weekly_digest",
+            "description": "Get the weekly ranking of a category; week like 2026-W36, default the latest.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "feed": {"type": "string", "description": "arXiv category code"},
+                    "week": {"type": "string", "description": "ISO week, like 2026-W36"},
+                },
+                "required": ["feed"],
+            },
+        },
+    },
 ]
 
 
 # ---------------------------------------------------------------------------
 # Tool execution
 # ---------------------------------------------------------------------------
+
+async def _paper_ref(arxiv_id: str, title: str | None) -> str:
+    """A paper of the insights named like the other tools name papers, by its database id."""
+    paper = await crud.get_paper_by_arxiv_id(arxiv_id)
+    # A paper removed after the build has no database id any more.
+    name = f"[ID:{paper.id}]" if paper is not None else f"[arXiv:{arxiv_id}]"
+    return f"{name} **{title or arxiv_id}**"
+
+
+def _more(total: int, shown: int) -> list[str]:
+    return [f"... and {total - shown} more"] if total > shown else []
+
 
 async def _exec_tool(name: str, args: dict) -> str:
     logger.info("Executing tool '%s' with args: %s", name, args)
@@ -190,6 +256,124 @@ async def _exec_tool(name: str, args: dict) -> str:
     if name == "remove_category":
         await crud.delete_category(args["category_id"])
         return "Category removed."
+
+    if name == "get_related_papers":
+        paper = await crud.get_paper(args["paper_id"])
+        if not paper:
+            return f"Paper {args['paper_id']} not found."
+        try:
+            related = store.related(paper.arxiv_id)
+        except store.NoResult:
+            return NO_INSIGHTS
+        if related is None:
+            return f"Paper {args['paper_id']} is not in the insights yet."
+        title = related["title"] or paper.title
+        if not related["similar"] and not related["cites"] and not related["cited_by"]:
+            return f"No related papers yet for **{title}**."
+        head = [f"Related to **{title}** (arXiv:{paper.arxiv_id})"]
+        if related["topic"]:
+            head.append(f"Topic: {related['topic']['name'] or related['topic']['topic']}")
+        sections = ["\n".join(head)]
+        if related["similar"]:
+            lines = ["Similar papers:"]
+            for s in related["similar"][:LIST_LIMIT]:
+                ref = await _paper_ref(s["arxiv_id"], s["title"])
+                lines.append(f"{ref} (similarity {s['score']:.2f})")
+            sections.append("\n".join(lines + _more(len(related["similar"]), LIST_LIMIT)))
+        for heading, key in (("Cites:", "cites"), ("Cited by:", "cited_by")):
+            if related[key]:
+                lines = [heading]
+                for c in related[key][:LIST_LIMIT]:
+                    lines.append(await _paper_ref(c["arxiv_id"], c["title"]))
+                sections.append("\n".join(lines + _more(len(related[key]), LIST_LIMIT)))
+        return "\n\n".join(sections)
+
+    if name == "get_topic":
+        try:
+            if args.get("topic") is None:
+                topics = store.topics()
+                if not topics:
+                    return "No topics yet."
+                lines = [
+                    f"[Topic {t['topic']}] {t['name']}: {t['size']} papers, {t['recent']} in the last four weeks. "
+                    f"Terms: {', '.join(t['terms'][:5])}"
+                    for t in topics[:LIST_LIMIT]
+                ]
+                return "\n".join(lines + _more(len(topics), LIST_LIMIT))
+            number = int(args["topic"])
+            topic = store.topic(number)
+        except store.NoResult:
+            return NO_INSIGHTS
+        if topic is None:
+            return f"Topic {number} not found."
+        lines = [
+            f"**{topic['name']}** (topic {number}, {topic['size']} papers, "
+            f"{topic['recent']} in the last four weeks)"
+        ]
+        if topic["blurb"]:
+            lines.append(topic["blurb"])
+        lines.append(f"Terms: {', '.join(topic['terms'])}")
+        if topic["exemplars"]:
+            lines.append("Typical papers:")
+            lines += [f"- {e['title']}" for e in topic["exemplars"][:LIST_LIMIT]]
+            lines += _more(len(topic["exemplars"]), LIST_LIMIT)
+        if topic["members"]:
+            # The closest members only; the first line already gives the topic's size.
+            lines.append("Closest papers:")
+            for m in topic["members"][:5]:
+                ref = await _paper_ref(m["arxiv_id"], m["title"])
+                lines.append(f"{ref} (similarity {m['sim']:.2f})")
+            lines += _more(len(topic["members"]), 5)
+        return "\n".join(lines)
+
+    if name == "get_trends":
+        feed = args["feed"]
+        try:
+            trends = store.trends(feed)
+        except store.NoResult:
+            return NO_INSIGHTS
+        if trends is None:
+            return f"No trends for {feed}."
+        if not trends["weeks"]:
+            return f"No complete week yet for {feed}."
+        lines = [f"Trends in {feed} (weeks {trends['weeks'][0]} to {trends['weeks'][-1]})"]
+        if trends["rising"]:
+            lines.append("Rising terms:")
+            for r in trends["rising"][:LIST_LIMIT]:
+                lines.append(f"- {r['term']}: {r['recent']} recent, {r['baseline']} before (z {r['z']:.2f})")
+            lines += _more(len(trends["rising"]), LIST_LIMIT)
+        if trends["bursts"]:
+            lines.append("Bursts:")
+            for b in trends["bursts"][:LIST_LIMIT]:
+                lines.append(f"- {b['term']}: {b['count']} in the last week, {b['before']} in the eight weeks before")
+            lines += _more(len(trends["bursts"]), LIST_LIMIT)
+        # Fastest growing first; the slope is kept in the file as numerator and denominator.
+        momentum = sorted(trends["topics"], key=lambda t: (-t["slope"][0], t["topic"]))
+        if momentum:
+            lines.append("Topics:")
+            for t in momentum[:5]:
+                counts = " ".join(str(c) for c in t["counts"])
+                per_week = format(t["slope"][0] / t["slope"][1], "+.2f")
+                lines.append(f"- {t['name'] or t['topic']}: {counts} ({per_week} per week)")
+            lines += _more(len(momentum), 5)
+        return "\n".join(lines)
+
+    if name == "get_weekly_digest":
+        feed = args["feed"]
+        week = args.get("week")
+        try:
+            if not week:
+                weeks = store.weeks(feed)
+                if not weeks:
+                    return f"No weekly digest for {feed}."
+                week = weeks[-1]
+            digest = store.digest(feed, week)
+        except store.NoResult:
+            return NO_INSIGHTS
+        if digest is None:
+            return f"No weekly digest for {feed} {week}."
+        page = digest["page"]
+        return page[:-1] if page.endswith("\n") else page
 
     logger.warning("Unknown tool requested: %s", name)
     return f"Unknown tool: {name}"

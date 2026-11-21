@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Topics - ArxivLens{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Topics</h1>
+</div>
+
+{% if empty %}
+<div class="empty-state">
+    <p>No insights have been built yet.</p>
+    <p>Run <code>python -m app insights build</code> to find the topics of the library.</p>
+</div>
+{% elif topics %}
+<div class="topic-grid">
+    {% for t in topics %}
+    <div class="topic-card">
+        <div class="topic-card-head">
+            <a href="/ui/topics/{{ t.topic }}" class="topic-name">{{ t.name }}</a>
+            {% if t.source == 'fallback' %}<span class="source-badge">fallback</span>{% endif %}
+        </div>
+        <p class="topic-counts">{{ t.size }} papers &middot; {{ t.recent }} in the last four weeks</p>
+        <div class="card-keywords">
+            {% for term in t.terms[:6] %}
+            <span class="term-pill">{{ term }}</span>
+            {% endfor %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% else %}
+<div class="empty-state">
+    <p>The last build found no topics.</p>
+</div>
+{% endif %}
+{% endblock %}

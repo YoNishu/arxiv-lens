@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Weekly{% if feed %} {{ feed }}{% endif %}{% if digest %} {{ digest.week }}{% endif %} - ArxivLens{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Weekly{% if feed %} {{ feed }}{% endif %}{% if digest %} {{ digest.week }}{% endif %}</h1>
+</div>
+
+{% if empty %}
+<div class="empty-state">
+    <p>No insights have been built yet.</p>
+    <p>Run <code>python -m app insights build</code> to rank the papers of each week.</p>
+</div>
+{% else %}
+<div class="feed-links">
+    {% for f in feeds %}
+    <a href="/ui/weekly/{{ f }}" class="feed-link{% if f == feed %} active{% endif %}">{{ f }}</a>
+    {% endfor %}
+</div>
+
+{% if not digest %}
+<div class="empty-state">
+    <p>No ranked week yet{% if feed %} for {{ feed }}{% endif %}.</p>
+</div>
+{% else %}
+<div class="week-nav">
+    {% if before %}<a href="/ui/weekly/{{ digest.feed }}/{{ before }}" class="btn-page">&larr; {{ before }}</a>{% endif %}
+    <span class="week-status {% if digest.closed %}closed{% else %}open{% endif %}">{% if digest.closed %}closed{% else %}open{% endif %}</span>
+    <span class="hint">{{ digest.ranked }} ranked</span>
+    {% if after %}<a href="/ui/weekly/{{ digest.feed }}/{{ after }}" class="btn-page">{{ after }} &rarr;</a>{% endif %}
+</div>
+
+<table class="insights-table weekly-table">
+    <thead><tr><th class="num">Rank</th><th>Paper</th><th class="num">Score</th><th>Topic</th></tr></thead>
+    <tbody>
+        {% for p in papers %}
+        <tr>
+            <td class="num">{{ p.rank }}</td>
+            <td>
+                <a href="/ui/arxiv/{{ p.arxiv_id }}">{{ p.title or p.arxiv_id }}</a>
+                <div class="weekly-authors">{{ p.authors[:3]|join(', ') }}{% if p.authors|length > 3 %} et al.{% endif %}</div>
+            </td>
+            <td class="num">{{ "%.2f"|format(p.score) }}</td>
+            <td>{{ p.topic or '-' }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+{% endif %}
+{% endblock %}

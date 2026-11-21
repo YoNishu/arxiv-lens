@@ -3,10 +3,13 @@ import logging
 from fastmcp import FastMCP
 
 from app.db import crud
+from app.insights import store
 
 logger = logging.getLogger(__name__)
 
 mcp = FastMCP("ArxivLens Assistant")
+
+NO_INSIGHTS = "No insights have been built yet. Run: python -m app insights build"
 
 
 @mcp.tool()
@@ -86,3 +89,59 @@ async def list_categories() -> str:
     if not cats:
         return "No categories subscribed."
     return "\n".join(f"- {c.name} ({c.arxiv_code})" for c in cats)
+
+
+@mcp.tool()
+async def related_papers(arxiv_id: str) -> str:
+    """Get similar, cited and citing papers for an arXiv id."""
+    logger.info("MCP tool: related_papers arxiv_id='%s'", arxiv_id)
+    try:
+        related = store.related(arxiv_id)
+    except store.NoResult:
+        return NO_INSIGHTS
+    if related is None:
+        return f"Paper {arxiv_id} is not in the insights."
+    lines = [
+        f"# {related['title']}",
+        f"arXiv:{arxiv_id} | {related['state']} | feeds: {', '.join(related['feeds'])}",
+        "",
+        "## Similar",
+    ]
+    lines += [f"- {s['arxiv_id']} {s['title']} ({s['score']:.3f})" for s in related["similar"]]
+    lines.append("## Cites")
+    lines += [f"- {c['arxiv_id']} {c['title']}" for c in related["cites"]]
+    lines.append(f"## Cited by ({related['cited_by_count']})")
+    lines += [f"- {c['arxiv_id']} {c['title']}" for c in related["cited_by"]]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def topics() -> str:
+    """List the research topics found in the library."""
+    logger.info("MCP tool: topics")
+    try:
+        found = store.topics()
+    except store.NoResult:
+        return NO_INSIGHTS
+    if not found:
+        return "No topics yet."
+    return "\n".join(
+        f"- {t['topic']}: {t['name']} ({t['size']} papers; {', '.join(t['terms'][:3])})" for t in found
+    )
+
+
+@mcp.tool()
+async def trends(feed: str) -> str:
+    """Get the rising terms of a subscribed category."""
+    logger.info("MCP tool: trends feed='%s'", feed)
+    try:
+        found = store.trends(feed)
+    except store.NoResult:
+        return NO_INSIGHTS
+    if found is None:
+        return f"No trends for {feed}."
+    if not found["rising"]:
+        return f"Nothing is rising in {feed}."
+    lines = [f"Rising in {feed}:"]
+    lines += [f"**{r['term']}** {r['recent']}/{r['baseline']} z={r['z']:.2f}" for r in found["rising"]]
+    return "\n".join(lines)

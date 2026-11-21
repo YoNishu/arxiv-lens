@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}{% if topic %}{{ topic.name }}{% else %}Topic{% endif %} - ArxivLens{% endblock %}
+{% block content %}
+<a href="/ui/topics" class="back-link">&larr; All topics</a>
+
+{% if empty %}
+<div class="empty-state">
+    <p>No insights have been built yet.</p>
+    <p>Run <code>python -m app insights build</code> to find the topics of the library.</p>
+</div>
+{% else %}
+<div class="topic-detail">
+    <div class="page-header">
+        <h1>{{ topic.name }}</h1>
+        {% if topic.source == 'fallback' %}<span class="source-badge">fallback</span>{% endif %}
+    </div>
+    <p class="topic-counts">Topic {{ topic.topic }} &middot; {{ topic.size }} papers &middot; {{ topic.recent }} in the last four weeks</p>
+    {% if topic.blurb %}
+    <p class="topic-blurb">{{ topic.blurb }}</p>
+    {% endif %}
+
+    <section class="detail-section">
+        <h2>Terms</h2>
+        <div class="card-keywords">
+            {% for term in topic.terms %}
+            <span class="term-pill">{{ term }}</span>
+            {% endfor %}
+        </div>
+    </section>
+
+    {% if topic.exemplars %}
+    <section class="detail-section">
+        <h2>Typical papers</h2>
+        <ul>
+            {% for e in topic.exemplars %}
+            <li><a href="/ui/arxiv/{{ e.arxiv_id }}">{{ e.title }}</a> <span class="arxiv-id">{{ e.arxiv_id }}</span></li>
+            {% endfor %}
+        </ul>
+    </section>
+    {% endif %}
+
+    <section class="detail-section">
+        <h2>Closest papers</h2>
+        {% if members %}
+        <table class="insights-table">
+            <thead><tr><th>Paper</th><th>arXiv</th><th class="num">Similarity</th></tr></thead>
+            <tbody>
+                {% for m in members %}
+                <tr>
+                    <td><a href="/ui/arxiv/{{ m.arxiv_id }}">{{ m.title or m.arxiv_id }}</a></td>
+                    <td class="arxiv-id">{{ m.arxiv_id }}</td>
+                    <td class="num">{{ "%.2f"|format(m.sim) }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% if member_count > members|length %}
+        <p class="hint">The {{ members|length }} closest of {{ member_count }} papers.</p>
+        {% endif %}
+        {% else %}
+        <p class="hint">No paper is placed with this topic.</p>
+        {% endif %}
+    </section>
+</div>
+{% endif %}
+{% endblock %}

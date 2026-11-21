@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Trends{% if feed %} in {{ feed }}{% endif %} - ArxivLens{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>Trends{% if feed %} in {{ feed }}{% endif %}</h1>
+</div>
+
+{% if empty %}
+<div class="empty-state">
+    <p>No insights have been built yet.</p>
+    <p>Run <code>python -m app insights build</code> to count the trends of each feed.</p>
+</div>
+{% else %}
+<div class="feed-links">
+    {% for f in feeds %}
+    <a href="/ui/trends/{{ f }}" class="feed-link{% if f == feed %} active{% endif %}">{{ f }}</a>
+    {% endfor %}
+</div>
+
+{% if not trends or not trends.weeks %}
+<div class="empty-state">
+    <p>No complete week yet{% if feed %} for {{ feed }}{% endif %}.</p>
+</div>
+{% else %}
+<section class="detail-section">
+    <h2>Weeks</h2>
+    <table class="insights-table">
+        <thead><tr><th>Week</th><th class="num">Papers</th><th class="num">Analysed</th></tr></thead>
+        <tbody>
+            {% for week, papers, analysed in weeks %}
+            <tr><td>{{ week }}</td><td class="num">{{ papers }}</td><td class="num">{{ analysed }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="detail-section">
+    <h2>Rising terms</h2>
+    {% if trends.rising %}
+    <table class="insights-table">
+        <thead><tr><th>Term</th><th class="num">Recent</th><th class="num">Before</th><th class="num">z</th></tr></thead>
+        <tbody>
+            {% for r in trends.rising %}
+            <tr><td>{{ r.term }}</td><td class="num">{{ r.recent }}</td><td class="num">{{ r.baseline }}</td><td class="num">{{ "%.2f"|format(r.z) }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="hint">Nothing is rising.</p>
+    {% endif %}
+</section>
+
+<section class="detail-section">
+    <h2>Bursts</h2>
+    {% if trends.bursts %}
+    <table class="insights-table">
+        <thead><tr><th>Term</th><th class="num">Last week</th><th class="num">Eight weeks before</th></tr></thead>
+        <tbody>
+            {% for b in trends.bursts %}
+            <tr><td>{{ b.term }}</td><td class="num">{{ b.count }}</td><td class="num">{{ b.before }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="hint">No burst in the last week.</p>
+    {% endif %}
+</section>
+
+<section class="detail-section">
+    <h2>Topics</h2>
+    {% if topics %}
+    <table class="insights-table">
+        <thead><tr><th>Topic</th><th>Last six weeks</th><th class="num">Per week</th></tr></thead>
+        <tbody>
+            {% for t in topics %}
+            <tr>
+                <td><a href="/ui/topics/{{ t.topic }}">{{ t.name or t.topic }}</a></td>
+                <td class="week-counts">{{ t.counts|join(' ') }}</td>
+                <td class="num">{{ "%+.2f"|format(t.per_week) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="hint">No topic had papers in the last six weeks.</p>
+    {% endif %}
+</section>
+{% endif %}
+{% endif %}
+{% endblock %}

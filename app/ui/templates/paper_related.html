@@ -1,0 +1,35 @@
+{% if related %}
+<section class="detail-section related-papers">
+    <h2>Related papers</h2>
+    {% if related.topic %}
+    <p class="related-topic">Topic: <a href="/ui/topics/{{ related.topic.topic }}">{{ related.topic.name or related.topic.topic }}</a></p>
+    {% endif %}
+
+    {% if related.similar %}
+    <h3>Similar</h3>
+    <ul class="related-list">
+        {% for s in related.similar %}
+        <li><a href="/ui/arxiv/{{ s.arxiv_id }}">{{ s.title or s.arxiv_id }}</a> <span class="related-score">{{ "%.2f"|format(s.score) }}</span></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if related.cites %}
+    <h3>Cites ({{ related.cites|length }})</h3>
+    <ul class="related-list">
+        {% for c in related.cites %}
+        <li><a href="/ui/arxiv/{{ c.arxiv_id }}">{{ c.title or c.arxiv_id }}</a></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    {% if related.cited_by %}
+    <h3>Cited by ({{ related.cited_by|length }})</h3>
+    <ul class="related-list">
+        {% for c in related.cited_by %}
+        <li><a href="/ui/arxiv/{{ c.arxiv_id }}">{{ c.title or c.arxiv_id }}</a></li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+</section>
+{% endif %}
